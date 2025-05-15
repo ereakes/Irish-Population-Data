@@ -1,0 +1,157 @@
+---
+title: "Ireland Population Markdown V2"
+author: "Ewan"
+date: "2025-03-19"
+output: html_document
+---
+
+```{r}
+# Loading required packages, csodata package has Irish Census records from 1841-2022
+
+library(csodata)
+library(sf)
+library(knitr)
+library(cartogram)
+library(transformr)
+library(gganimate)
+library(gifski)
+library(RColorBrewer)
+library(tidyverse)
+library(rmapshaper) #Used to fix a visual glitch in animation
+```
+
+```{r}
+#CNA13 is the code for the dataset in the csodata package with population of the 1841-2022 censuses access here: https://data.cso.ie/table/CNA13
+
+population <- cso_get_data("CNA13")
+```
+
+```{r}
+# Filtering and transforming data, dividing population by 1000 for readability in later graph
+
+filtered_population <- population %>%
+  filter(Statistic == "Population") %>%
+  filter(Sex == "Both sexes") %>%
+  filter(!( Province.or.County %in% c("State", 
+                                      "Leinster", 
+                                      "Munster", 
+                                      "Connacht", 
+                                      "Ulster (part of)", 
+                                      "North Tipperary", 
+                                      "South Tipperary"))) %>%
+  select("Province.or.County", "1841":"2016") %>%
+  rename(County = "Province.or.County") %>%
+  mutate(County = toupper(County)) %>%
+  mutate(across(.cols = c(`1841`:`2016`), .fns = ~.x / 1000))
+
+tibble(filtered_population)
+```
+
+```{r}
+# Reading shapefile data downloaded from the OSi data accessed from here: https://shorturl.at/CBTjE
+
+my_sf <- read_sf("Counties___OSi_National_Statutory_Boundaries___Generalised_20m_-6920972630406172930.geojson")
+
+# Transforming shapefile to EPSG 2157 for accuracy
+my_sf_3857 <- st_transform(my_sf, 2157)
+
+# Rename english county name column header for joining
+names(my_sf_3857)[names(my_sf_3857) == 'ENGLISH'] <- 'County'
+
+```
+
+```{r}
+# Joining population and shapefile
+population_sf <- my_sf_3857 %>%
+  inner_join(divided_population, by = c("County")) %>%
+  select("County", "geometry","1841":"2016")
+
+# Simplifying the shapefile to lower burden, this also fixed a previous visual glitch
+population_sf <- ms_simplify(population_sf, keep = 0.05) 
+
+# Creating 'weighted' cartograms to ensure that shapefiles and population are working as intended
+weighted_ire_1841 <- 
+  cartogram_cont(population_sf,
+                 weight = "1841", itermax = 5)
+
+weighted_ire_2016 <- 
+  cartogram_cont(population_sf,
+                 weight = "2016", itermax = 5)
+
+# Plotting
+ggplot(weighted_ire_1841) +
+  geom_sf() +
+  theme_void()
+
+ggplot(weighted_ire_2016) +
+  geom_sf() +
+  theme_void()
+```
+
+```{r}
+# Adding limits for cartogram colours and legend
+common_limits <- c(min(weighted_ire_1841$`1841`, weighted_ire_2016$`2016`), max(weighted_ire_1841$`1841`, weighted_ire_2016$`2016`))
+
+# Initial cartogram plot
+ggplot(weighted_ire_1841) +
+  geom_sf(aes(fill = `1841`), color = "white") +
+  theme_void() +   
+  scale_fill_viridis_c(name = "Population\n(Thousands)", limits = common_limits, breaks = c(300, 600, 900, 1200, 1500)) +
+  labs(title = "Cartogram of Irish Population 1841") +
+  theme(
+    text = element_text(color = "#22211d"),
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA),
+    legend.background = element_rect(fill = "white", color = NA),
+    legend.text= element_text(size=6, face = "bold"),
+    legend.title = element_text(size=8, face = "bold"),
+    plot.title=element_text(family='', face='bold', colour='black', size=16, hjust = 0),
+    legend.box.margin = (margin(r=10))
+  )
+
+ggsave("Cartogram_Population_1841.png")
+```
+
+```{r}
+# Ensure the data is in long format for animation
+population_long <- population_sf %>%
+  pivot_longer(cols = c("1841", "1851", "1861", "1871", "1881", "1891", "1901", 
+                        "1911", "1926", "1936", "1946", "1951", "1956", "1961", "1966", "1971", "1979",
+                        "1981", "1986",  "1991", "1996","2002", "2006", "2011", "2016"), 
+               names_to = "year", values_to = "population")
+
+#Generate Cartograms for Each Year
+cartogram_list <- list()
+
+for (yr in unique(population_long$year)) {
+  cat("Processing year:", yr, "\n")  # Print progress
+  pop_sf <- population_long %>% filter(year == yr)  # Filter for the year
+  
+  cartogram_sf <- cartogram_cont(pop_sf, "population", itermax = 12)
+  cartogram_sf$year <- yr  # Assign back year info
+  
+  cartogram_list[[as.character(yr)]] <- cartogram_sf
+}
+
+# Combine all cartograms
+cartogram_animated <- bind_rows(cartogram_list)
+
+
+anim <- ggplot(cartogram_animated) +
+  geom_sf(aes(fill = population), color = "white", size = 0.2) +
+  scale_fill_viridis_c(trans = "log", breaks = c(100,300,1200)) +
+  theme_void() +
+  labs(title = "Irish Population Cartogram:", subtitle = "{closest_state}", fill = " Population\n(Thousands)") +
+  transition_states(year, transition_length = 2, state_length = 1) +
+  ease_aes("cubic-in-out") +
+  theme(    legend.text= element_text(size=10, face = "bold", family = "mono"),
+    legend.title = element_text(family = 'mono', size=12, hjust = 1),
+    plot.title = element_text(family= 'mono', face="bold", colour='black', size=32, hjust = 0.2, vjust = 0),
+    plot.subtitle = element_text(family= 'mono', face="bold", size=32, hjust = 0.6))
+
+# Saving animations at 2 durations
+animate(anim, fps = 25, duration = 15, width = 600, height = 600, renderer = gifski_renderer("Animated_Cartogram_Ireland.gif"))
+
+animate(anim, fps = 25, duration = 5, width = 600, height = 600, renderer = gifski_renderer("Animated_Cartogram_Ireland_Fast.gif"))
+```
+
